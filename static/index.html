@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Assistant</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .chat-container {
+            background-color: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+            min-height: 400px;
+            max-height: 600px;
+            overflow-y: auto;
+        }
+        .message {
+            margin: 10px 0;
+            padding: 10px;
+            border-radius: 5px;
+        }
+        .user-message {
+            background-color: #e3f2fd;
+            margin-left: 20%;
+        }
+        .assistant-message {
+            background-color: #f5f5f5;
+            margin-right: 20%;
+        }
+        .controls {
+            text-align: center;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 10px;
+            border: none;
+            border-radius: 5px;
+            background-color: #2196f3;
+            color: white;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #1976d2;
+        }
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+        .status {
+            text-align: center;
+            color: #666;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>Voice Assistant</h1>
+    <div class="chat-container" id="chat-container"></div>
+    <div class="status" id="status">Ready</div>
+    <div class="controls">
+        <button id="startButton">Start Recording</button>
+        <button id="stopButton" disabled>Stop Recording</button>
+    </div>
+
+    <script>
+        let ws;
+        let audioContext;
+        let audioWorklet;
+        let mediaStream;
+        let isRecording = false;
+
+        const chatContainer = document.getElementById('chat-container');
+        const statusElement = document.getElementById('status');
+        const startButton = document.getElementById('startButton');
+        const stopButton = document.getElementById('stopButton');
+
+        async function initializeAudio() {
+            try {
+                audioContext = new AudioContext();
+                await audioContext.audioWorklet.addModule('/static/audio-processor-worklet.js');
+                await audioContext.audioWorklet.addModule('/static/audio-playback-worklet.js');
+                
+                // Setup audio playback
+                const playbackWorklet = new AudioWorkletNode(audioContext, 'audio-playback');
+                playbackWorklet.connect(audioContext.destination);
+
+                // Setup WebSocket
+                ws = new WebSocket(`ws://${window.location.host}/ws`);
+                
+                ws.onmessage = async (event) => {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'response.audio.delta') {
+                        // Handle audio playback
+                        playbackWorklet.port.postMessage({
+                            type: 'audio',
+                            audio: data.audio
+                        });
+                    } else if (data.type === 'response.audio_transcript.done') {
+                        // Display assistant's message
+                        addMessage('Assistant', data.transcript);
+                    } else if (data.type === 'conversation.item.input_audio_transcription.completed') {
+                        // Display user's message
+                        addMessage('You', data.transcript);
+                    }
+                };
+
+                ws.onclose = () => {
+                    updateStatus('Connection closed');
+                    stopRecording();
+                };
+
+                updateStatus('Ready to record');
+                startButton.disabled = false;
+            } catch (error) {
+                console.error('Error initializing audio:', error);
+                updateStatus('Error initializing audio');
+            }
+        }
+
+        async function startRecording() {
+            try {
+                mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                const source = audioContext.createMediaStreamSource(mediaStream);
+                audioWorklet = new AudioWorkletNode(audioContext, 'audio-processor');
+                
+                audioWorklet.port.onmessage = (event) => {
+                    if (event.data.eventType === 'audio') {
+                        ws.send(JSON.stringify({
+                            type: 'input_audio_buffer.append',
+                            audio_buffer: event.data.audioData
+                        }));
+                    }
+                };
+
+                source.connect(audioWorklet);
+                audioWorklet.connect(audioContext.destination);
+                
+                isRecording = true;
+                updateStatus('Recording...');
+                startButton.disabled = true;
+                stopButton.disabled = false;
+            } catch (error) {
+                console.error('Error starting recording:', error);
+                updateStatus('Error starting recording');
+            }
+        }
+
+        function stopRecording() {
+            if (mediaStream) {
+                mediaStream.getTracks().forEach(track => track.stop());
+                mediaStream = null;
+            }
+            if (audioWorklet) {
+                audioWorklet.disconnect();
+                audioWorklet = null;
+            }
+            isRecording = false;
+            updateStatus('Stopped recording');
+            startButton.disabled = false;
+            stopButton.disabled = true;
+        }
+
+        function updateStatus(message) {
+            statusElement.textContent = message;
+        }
+
+        function addMessage(sender, text) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${sender === 'You' ? 'user-message' : 'assistant-message'}`;
+            messageDiv.textContent = `${sender}: ${text}`;
+            chatContainer.appendChild(messageDiv);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        // Event listeners
+        startButton.addEventListener('click', startRecording);
+        stopButton.addEventListener('click', stopRecording);
+
+        // Initialize when page loads
+        window.addEventListener('load', initializeAudio);
+    </script>
+</body>
+</html>
